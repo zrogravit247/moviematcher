@@ -107,13 +107,21 @@
                         <p id="movieOverview" class="text-muted"></p>
                         <div class="mt-4">
                             <div class="mb-3">
-                                <p class="text-muted mb-2">Have you watched this movie?</p>
-                                <div class="btn-group w-100" role="group">
-                                    <button type="button" class="btn btn-outline-success" id="watchedBtn" data-watched="true">
-                                        <i class="fas fa-check me-2"></i>Watched
+                                <p class="text-muted mb-2">How do you feel about this recommendation?</p>
+                                <div class="btn-group w-100 mb-2" role="group">
+                                    <button type="button" class="btn btn-outline-success" id="likeBtn">
+                                        <i class="fas fa-thumbs-up me-2"></i>Love It
                                     </button>
-                                    <button type="button" class="btn btn-outline-warning" id="notWatchedBtn" data-watched="false">
-                                        <i class="fas fa-bookmark me-2"></i>Not Watched
+                                    <button type="button" class="btn btn-outline-danger" id="dislikeBtn">
+                                        <i class="fas fa-thumbs-down me-2"></i>Not For Me
+                                    </button>
+                                </div>
+                                <div class="btn-group w-100" role="group">
+                                    <button type="button" class="btn btn-outline-warning" id="watchedBtn" data-watched="true">
+                                        <i class="fas fa-eye me-2"></i>Already Watched
+                                    </button>
+                                    <button type="button" class="btn btn-outline-info" id="notWatchedBtn" data-watched="false">
+                                        <i class="fas fa-bookmark me-2"></i>Want to Watch
                                     </button>
                                 </div>
                             </div>

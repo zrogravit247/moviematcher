@@ -38,6 +38,8 @@ class MovieRecommendationApp {
         // Action buttons
         this.getAnotherBtn = document.getElementById('getAnotherBtn');
         this.resetBtn = document.getElementById('resetBtn');
+        this.likeBtn = document.getElementById('likeBtn');
+        this.dislikeBtn = document.getElementById('dislikeBtn');
         this.watchedBtn = document.getElementById('watchedBtn');
         this.notWatchedBtn = document.getElementById('notWatchedBtn');
         this.addToWatchlistBtn = document.getElementById('addToWatchlistBtn');
@@ -47,6 +49,8 @@ class MovieRecommendationApp {
         this.movieForm.addEventListener('submit', (e) => this.handleFormSubmit(e));
         this.getAnotherBtn.addEventListener('click', () => this.getAnotherRecommendation());
         this.resetBtn.addEventListener('click', () => this.resetApp());
+        this.likeBtn.addEventListener('click', () => this.handleLikeFeedback(true));
+        this.dislikeBtn.addEventListener('click', () => this.handleLikeFeedback(false));
         this.watchedBtn.addEventListener('click', () => this.handleWatchedStatus(true));
         this.notWatchedBtn.addEventListener('click', () => this.handleWatchedStatus(false));
         this.addToWatchlistBtn.addEventListener('click', () => this.addToWatchlist());
@@ -217,13 +221,23 @@ class MovieRecommendationApp {
             this.movieRating.textContent = `★ ${movie.vote_average.toFixed(1)}/10`;
             this.movieOverview.textContent = movie.overview || 'No overview available.';
 
-            // Set poster image
+            // Set poster image with error handling
             if (movie.poster_path) {
-                this.moviePoster.src = `${this.imageBaseURL}${movie.poster_path}`;
+                const posterUrl = `${this.imageBaseURL}${movie.poster_path}`;
+                this.moviePoster.onload = () => {
+                    this.moviePoster.style.opacity = '1';
+                };
+                this.moviePoster.onerror = () => {
+                    console.warn('Failed to load poster:', posterUrl);
+                    this.moviePoster.src = this.getPlaceholderImage();
+                };
+                this.moviePoster.style.opacity = '0.5';
+                this.moviePoster.src = posterUrl;
                 this.moviePoster.alt = `${movie.title} Poster`;
             } else {
-                this.moviePoster.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQ1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxOCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIFBvc3RlcjwvdGV4dD48L3N2Zz4=';
+                this.moviePoster.src = this.getPlaceholderImage();
                 this.moviePoster.alt = 'No Poster Available';
+                this.moviePoster.style.opacity = '1';
             }
 
             // Display genres
@@ -231,15 +245,20 @@ class MovieRecommendationApp {
                 this.movieGenres.innerHTML = '';
                 detailedMovie.genres.forEach(genre => {
                     const genreBadge = document.createElement('span');
-                    genreBadge.className = 'badge bg-outline-info me-1 mb-1';
+                    genreBadge.className = 'badge bg-info me-1 mb-1';
                     genreBadge.textContent = genre.name;
                     this.movieGenres.appendChild(genreBadge);
                 });
             }
 
-            // Reset watched/not watched buttons
-            this.resetWatchedButtons();
+            // Reset all feedback buttons and poster styling
+            this.resetFeedbackButtons();
             this.addToWatchlistBtn.classList.add('d-none');
+            
+            // Reset poster styling
+            if (this.moviePoster) {
+                this.moviePoster.style.filter = 'none';
+            }
 
             this.showRecommendation();
 
@@ -407,34 +426,77 @@ class MovieRecommendationApp {
         }
     }
 
-    handleWatchedStatus(watched) {
+    handleLikeFeedback(liked) {
         if (!this.currentRecommendation) return;
         
         // Update button styles
-        if (watched) {
-            this.watchedBtn.classList.remove('btn-outline-success');
-            this.watchedBtn.classList.add('btn-success');
-            this.notWatchedBtn.classList.remove('btn-warning');
-            this.notWatchedBtn.classList.add('btn-outline-warning');
-            this.addToWatchlistBtn.classList.add('d-none');
+        if (liked) {
+            this.likeBtn.classList.remove('btn-outline-success');
+            this.likeBtn.classList.add('btn-success');
+            this.dislikeBtn.classList.remove('btn-danger');
+            this.dislikeBtn.classList.add('btn-outline-danger');
+            this.showSuccess('Thanks for the feedback! Getting another recommendation...');
             
-            // Automatically get another recommendation
+            // Automatically get another recommendation after positive feedback
             setTimeout(() => {
                 this.getAnotherRecommendation();
-            }, 1000);
+            }, 1500);
         } else {
-            this.notWatchedBtn.classList.remove('btn-outline-warning');
-            this.notWatchedBtn.classList.add('btn-warning');
-            this.watchedBtn.classList.remove('btn-success');
-            this.watchedBtn.classList.add('btn-outline-success');
-            this.addToWatchlistBtn.classList.remove('d-none');
+            this.dislikeBtn.classList.remove('btn-outline-danger');
+            this.dislikeBtn.classList.add('btn-danger');
+            this.likeBtn.classList.remove('btn-success');
+            this.likeBtn.classList.add('btn-outline-success');
+            this.showSuccess('Thanks for the feedback! We will learn from this...');
+            
+            // Get another recommendation after negative feedback
+            setTimeout(() => {
+                this.getAnotherRecommendation();
+            }, 1500);
         }
         
         // Send feedback to backend
-        this.sendRecommendationFeedback(this.currentRecommendation.id, watched);
+        this.sendRecommendationFeedback(this.currentRecommendation.id, liked);
     }
 
-    async sendRecommendationFeedback(movieId, watched) {
+    handleWatchedStatus(watched) {
+        if (!this.currentRecommendation) return;
+        
+        // Grey out the poster
+        const posterImg = this.moviePoster;
+        if (posterImg) {
+            posterImg.style.filter = 'grayscale(100%) opacity(0.6)';
+        }
+        
+        // Update button styles
+        if (watched) {
+            this.watchedBtn.classList.remove('btn-outline-warning');
+            this.watchedBtn.classList.add('btn-warning');
+            this.notWatchedBtn.classList.remove('btn-info');
+            this.notWatchedBtn.classList.add('btn-outline-info');
+            this.addToWatchlistBtn.classList.add('d-none');
+            
+            this.showSuccess('Got it! Getting another recommendation...');
+            // Automatically get another recommendation
+            setTimeout(() => {
+                this.getAnotherRecommendation();
+            }, 1500);
+        } else {
+            this.notWatchedBtn.classList.remove('btn-outline-info');
+            this.notWatchedBtn.classList.add('btn-info');
+            this.watchedBtn.classList.remove('btn-warning');
+            this.watchedBtn.classList.add('btn-outline-warning');
+            this.addToWatchlistBtn.classList.remove('d-none');
+            
+            this.showSuccess('Added to your watchlist! Getting another recommendation...');
+            // Add to watchlist and get another recommendation
+            this.addToWatchlist();
+            setTimeout(() => {
+                this.getAnotherRecommendation();
+            }, 1500);
+        }
+    }
+
+    async sendRecommendationFeedback(movieId, liked) {
         try {
             await fetch('/api/recommendation-feedback', {
                 method: 'POST',
@@ -443,7 +505,7 @@ class MovieRecommendationApp {
                 },
                 body: JSON.stringify({
                     recommendation_id: movieId,
-                    liked: !watched // If watched, it means they already saw it (neutral), if not watched, they want to see it (positive)
+                    liked: liked
                 })
             });
         } catch (error) {
@@ -451,11 +513,18 @@ class MovieRecommendationApp {
         }
     }
 
-    resetWatchedButtons() {
-        this.watchedBtn.classList.remove('btn-success');
-        this.watchedBtn.classList.add('btn-outline-success');
-        this.notWatchedBtn.classList.remove('btn-warning');
-        this.notWatchedBtn.classList.add('btn-outline-warning');
+    resetFeedbackButtons() {
+        // Reset like/dislike buttons
+        this.likeBtn.classList.remove('btn-success');
+        this.likeBtn.classList.add('btn-outline-success');
+        this.dislikeBtn.classList.remove('btn-danger');
+        this.dislikeBtn.classList.add('btn-outline-danger');
+        
+        // Reset watched buttons
+        this.watchedBtn.classList.remove('btn-warning');
+        this.watchedBtn.classList.add('btn-outline-warning');
+        this.notWatchedBtn.classList.remove('btn-info');
+        this.notWatchedBtn.classList.add('btn-outline-info');
     }
 
     async addToWatchlist() {
@@ -508,6 +577,10 @@ class MovieRecommendationApp {
                 successAlert.remove();
             }
         }, 3000);
+    }
+
+    getPlaceholderImage() {
+        return 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQ1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMzc0MTUxIi8+PHRleHQgeD0iNTAlIiB5PSI0NSUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNiIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIFBvc3RlcjwvdGV4dD48dGV4dCB4PSI1MCUiIHk9IjU1JSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjNjM3Mzg0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+QXZhaWxhYmxlPC90ZXh0Pjwvc3ZnPg==';
     }
 }
 

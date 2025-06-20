@@ -1,13 +1,16 @@
 [project]
-name = "repl-nix-workspace"
-version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.11"
+name = "movie-recommendation-app"
+version = "1.0.0"
+description = "A Flask-based movie recommendation application using TMDB API"
 dependencies = [
-    "email-validator>=2.2.0",
-    "flask>=3.1.1",
-    "flask-sqlalchemy>=3.1.1",
-    "gunicorn>=23.0.0",
-    "psycopg2-binary>=2.9.10",
-    "requests>=2.32.4",
+    "Flask>=3.0.0",
+    "Flask-SQLAlchemy>=3.1.1",
+    "requests>=2.31.0",
+    "psycopg2-binary>=2.9.9",
+    "gunicorn>=21.2.0",
+    "email-validator>=2.1.0"
 ]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

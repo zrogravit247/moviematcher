@@ -47,6 +47,129 @@ def get_or_create_user():
     
     return user
 
+def analyze_user_preferences(user_movies):
+    """Analyze user movie preferences to understand their taste"""
+    from collections import Counter
+    import statistics
+    
+    # Extract all genres and count frequency
+    all_genres = []
+    ratings = []
+    years = []
+    
+    for movie in user_movies:
+        if movie.get('genre_ids'):
+            all_genres.extend(movie['genre_ids'])
+        if movie.get('vote_average'):
+            ratings.append(movie['vote_average'])
+        if movie.get('release_date'):
+            try:
+                year = int(movie['release_date'][:4])
+                years.append(year)
+            except (ValueError, IndexError):
+                pass
+    
+    # Genre preferences (weighted by frequency)
+    genre_counts = Counter(all_genres)
+    primary_genres = [genre for genre, count in genre_counts.most_common(5)]
+    
+    # Rating preferences
+    avg_rating = statistics.mean(ratings) if ratings else 7.0
+    min_rating = max(6.0, avg_rating - 1.5)  # Don't go too low
+    
+    # Era preferences (with some flexibility)
+    if years:
+        avg_year = statistics.mean(years)
+        year_range = max(15, statistics.stdev(years) * 2) if len(years) > 1 else 20
+        era_start = max(1990, int(avg_year - year_range))
+        era_end = min(2024, int(avg_year + year_range))
+    else:
+        era_start = 2000
+        era_end = 2024
+    
+    return {
+        'genres': primary_genres,
+        'primary_genres': primary_genres[:3],
+        'avg_rating': avg_rating,
+        'min_rating': min_rating,
+        'era_start': f"{era_start}-01-01",
+        'era_end': f"{era_end}-12-31",
+        'preferred_year_range': (era_start, era_end)
+    }
+
+def calculate_similarity_score(candidate, user_analysis, user):
+    """Fast similarity scoring for candidate movies"""
+    score = 0
+    
+    # Core genre matching (primary factor)
+    candidate_genres = set(candidate.get('genre_ids', []))
+    user_genres = set(user_analysis['primary_genres'])
+    genre_overlap = len(candidate_genres.intersection(user_genres))
+    
+    if genre_overlap > 0:
+        score += genre_overlap * 30
+    
+    # Quick user feedback check (cached for speed)
+    if hasattr(user, '_genre_preferences_cache'):
+        user_feedback = user._genre_preferences_cache
+    else:
+        user_feedback = get_user_genre_preferences(user)
+        user._genre_preferences_cache = user_feedback
+    
+    for genre_id in candidate_genres:
+        if genre_id in user_feedback['liked_genres']:
+            score += 12
+        elif genre_id in user_feedback['disliked_genres']:
+            score -= 8
+    
+    # Rating quality
+    candidate_rating = candidate.get('vote_average', 0)
+    if candidate_rating >= 7.5:
+        score += 10
+    elif candidate_rating >= 7.0:
+        score += 6
+    elif candidate_rating < 6.0:
+        score -= 10
+    
+    # Simple popularity balance
+    popularity = candidate.get('popularity', 0)
+    if 20 <= popularity <= 150:
+        score += 8
+    elif popularity > 300:
+        score -= 2  # Avoid overly mainstream
+    
+    return max(0, score)
+
+def get_user_genre_preferences(user):
+    """Fast user genre preference lookup with caching"""
+    liked_genres = set()
+    disliked_genres = set()
+    
+    # Only check recent recommendations for speed
+    recent_recs = models.Recommendation.query.filter_by(
+        user_id=user.id
+    ).filter(
+        models.Recommendation.was_liked.isnot(None)
+    ).order_by(
+        models.Recommendation.recommended_at.desc()
+    ).limit(20).all()
+    
+    for rec in recent_recs:
+        if rec.genres:
+            genre_ids = [g['id'] for g in rec.genres if 'id' in g]
+            if rec.was_liked:
+                liked_genres.update(genre_ids)
+            else:
+                disliked_genres.update(genre_ids)
+    
+    # Remove conflicts
+    disliked_genres = disliked_genres - liked_genres
+    
+    return {
+        'liked_genres': liked_genres,
+        'disliked_genres': disliked_genres
+    }
+
 @app.route('/')
 def index():
     # Check if API key is configured
@@ -133,54 +256,138 @@ def get_recommendation():
     try:
         user = get_or_create_user()
         
-        # Extract genres from user movies
-        all_genres = set()
-        for movie in user_movies:
-            if movie.get('genre_ids'):
-                all_genres.update(movie['genre_ids'])
+        # Analyze user preferences
+        user_analysis = analyze_user_preferences(user_movies)
         
-        if not all_genres:
+        if not user_analysis['genres']:
             return jsonify({'error': 'No genres found in provided movies'}), 400
         
-        # Search for movies with similar genres
-        genre_list = ','.join(map(str, list(all_genres)[:3]))  # Use top 3 genres
+        # Get candidates more efficiently with parallel requests
+        import concurrent.futures
+        import threading
         
-        response = requests.get(
-            f"{TMDB_BASE_URL}/discover/movie",
-            params={
-                'api_key': TMDB_API_KEY,
-                'with_genres': genre_list,
-                'sort_by': 'vote_average.desc',
-                'vote_count.gte': 100,
-                'include_adult': False,
-                'page': 1
-            },
-            timeout=10
-        )
+        all_candidates = []
+        primary_genres = user_analysis['primary_genres'][:2]
         
-        response.raise_for_status()
-        recommendations = response.json().get('results', [])
+        def fetch_discover_movies(genres, sort_by='vote_average.desc', page=1):
+            try:
+                # Cache key for this request
+                cache_key = f"discover_{','.join(map(str, genres))}_{sort_by}_{page}"
+                
+                response = requests.get(
+                    f"{TMDB_BASE_URL}/discover/movie",
+                    params={
+                        'api_key': TMDB_API_KEY,
+                        'with_genres': ','.join(map(str, genres)) if isinstance(genres, list) else str(genres),
+                        'sort_by': sort_by,
+                        'vote_count.gte': 20,  # Even lower for more variety
+                        'vote_average.gte': 6.0,  # Fixed minimum quality
+                        'include_adult': False,
+                        'page': page
+                    },
+                    timeout=2  # Very fast timeout
+                )
+                return response.json().get('results', [])[:40] if response.ok else []
+            except Exception as e:
+                print(f"Discovery request failed: {e}")
+                return []
         
-        # Filter out user movies and previously recommended movies
-        filtered_recommendations = [
-            movie for movie in recommendations
-            if movie['id'] not in excluded_ids and
-               movie.get('vote_average', 0) > 6.0 and
-               movie.get('poster_path')
-        ]
+        def fetch_similar_movies(movie_id):
+            try:
+                response = requests.get(
+                    f"{TMDB_BASE_URL}/movie/{movie_id}/similar",
+                    params={'api_key': TMDB_API_KEY, 'page': 1},
+                    timeout=2
+                )
+                return response.json().get('results', [])[:15] if response.ok else []
+            except Exception as e:
+                print(f"Similar movies request failed: {e}")
+                return []
         
-        if not filtered_recommendations:
+        # Optimized concurrent requests with caching
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            
+            # Single high-quality request for primary genres
+            futures.append(executor.submit(fetch_discover_movies, primary_genres, 'vote_average.desc'))
+            
+            # Similar movies only for highest-rated user movie
+            if user_movies:
+                best_movie = max(user_movies, key=lambda m: m.get('vote_average', 0))
+                futures.append(executor.submit(fetch_similar_movies, best_movie['id']))
+            
+            # Collect results quickly
+            for future in concurrent.futures.as_completed(futures, timeout=5):
+                try:
+                    results = future.result()
+                    if results:
+                        all_candidates.extend(results)
+                except Exception as e:
+                    print(f"Request failed: {e}")
+                    continue
+        
+        # Fast deduplication and filtering
+        seen_ids = set(excluded_ids)
+        unique_candidates = []
+        
+        for movie in all_candidates:
+            movie_id = movie.get('id')
+            if (movie_id and movie_id not in seen_ids and
+                movie.get('vote_average', 0) >= 6.0 and  # Quality threshold
+                movie.get('poster_path') and
+                movie.get('overview') and
+                len(movie.get('overview', '')) > 20):  # Ensure meaningful overview
+                seen_ids.add(movie_id)
+                unique_candidates.append(movie)
+                
+                # Limit for performance while maintaining variety
+                if len(unique_candidates) >= 60:
+                    break
+        
+        if not unique_candidates:
             return jsonify({'error': 'No suitable recommendations found'}), 404
         
-        # Sort by rating and popularity, then pick randomly from top results
-        sorted_recs = sorted(
-            filtered_recommendations[:10],
-            key=lambda x: x.get('vote_average', 0) * x.get('popularity', 0),
-            reverse=True
-        )
+        # Quick scoring with simplified algorithm
+        scored_candidates = []
+        user_genres = set(user_analysis['primary_genres'])
+        
+        for candidate in unique_candidates:
+            # Simplified fast scoring
+            score = 0
+            candidate_genres = set(candidate.get('genre_ids', []))
+            genre_overlap = len(candidate_genres.intersection(user_genres))
+            
+            if genre_overlap > 0:
+                score += genre_overlap * 30
+            
+            # Rating bonus
+            rating = candidate.get('vote_average', 0)
+            if rating >= 7.0:
+                score += 15
+            elif rating >= 6.5:
+                score += 10
+            
+            # Popularity balance
+            popularity = candidate.get('popularity', 0)
+            if 10 <= popularity <= 200:
+                score += 10
+            elif popularity > 200:
+                score += 5
+            
+            scored_candidates.append((candidate, score))
+        
+        # Selection from wider range of candidates for variety
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        top_candidates = scored_candidates[:20]  # Larger pool for variety
         
         import random
-        recommendation = random.choice(sorted_recs[:5])  # Pick from top 5
+        # Simple weighted random selection
+        if top_candidates:
+            weights = [max(1, score) for _, score in top_candidates]
+            recommendation = random.choices([movie for movie, _ in top_candidates], weights=weights)[0]
+        else:
+            # Fallback to first candidate if scoring fails
+            recommendation = unique_candidates[0]
         
         # Get detailed movie information for genres
         movie_details_response = requests.get(
@@ -404,6 +611,38 @@ def get_watchlist():
         
     except Exception as e:
         return jsonify({'error': f'Failed to get watchlist: {str(e)}'}), 500
+
+@app.route('/api/download-watchlist-csv')
+def download_watchlist_csv():
+    """Download user's watchlist as CSV"""
+    try:
+        user = get_or_create_user()
+        watchlist_items = models.Watchlist.query.filter_by(user_id=user.id).order_by(models.Watchlist.added_at.desc()).all()
+        
+        # Create CSV content
+        csv_content = "Title,Year,tmdbID\n"
+        
+        for item in watchlist_items:
+            title = item.title.replace('"', '""')  # Escape quotes in CSV
+            year = ""
+            if item.release_date:
+                try:
+                    year = item.release_date[:4]
+                except:
+                    year = ""
+            
+            csv_content += f'"{title}",{year},{item.tmdb_id}\n'
+        
+        # Return as downloadable file
+        from flask import Response
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={"Content-disposition": "attachment; filename=my-watchlist.csv"}
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/remove-from-watchlist', methods=['POST'])
 def remove_from_watchlist():
