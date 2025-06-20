@@ -97,48 +97,305 @@ def analyze_user_preferences(user_movies):
         'preferred_year_range': (era_start, era_end)
     }
 
-def calculate_similarity_score(candidate, user_analysis, user):
-    """Fast similarity scoring for candidate movies"""
-    score = 0
+def get_cached_tone_analysis(movie_id, title, overview, genres):
+    """Fast tonal analysis using cached patterns and genre inference"""
+    # Skip API calls for speed - use overview and genre-based inference
+    tone_scores = {}
     
-    # Core genre matching (primary factor)
+    # Quick tone inference from overview text
+    overview_lower = (overview or '').lower()
+    title_lower = (title or '').lower()
+    
+    tone_patterns = {
+        'dark': ['dark', 'brutal', 'violent', 'murder', 'death', 'crime', 'war', 'horror'],
+        'uplifting': ['hope', 'inspiring', 'triumph', 'success', 'love', 'family', 'friendship'],
+        'thrilling': ['action', 'chase', 'escape', 'fight', 'mission', 'adventure', 'suspense'],
+        'comedic': ['funny', 'comedy', 'laugh', 'humor', 'hilarious', 'romantic comedy'],
+        'dramatic': ['emotional', 'drama', 'life', 'story', 'relationship', 'struggle'],
+        'romantic': ['love', 'romance', 'relationship', 'wedding', 'couple', 'heart']
+    }
+    
+    # Genre-based tone mapping (fast lookup)
+    genre_tones = {
+        28: 'thrilling',    # Action
+        35: 'comedic',      # Comedy
+        80: 'dark',         # Crime
+        18: 'dramatic',     # Drama
+        27: 'dark',         # Horror
+        10749: 'romantic',  # Romance
+        53: 'thrilling',    # Thriller
+        10752: 'dramatic'   # War
+    }
+    
+    # Score based on genres (fast)
+    for genre_id in genres:
+        if genre_id in genre_tones:
+            tone = genre_tones[genre_id]
+            tone_scores[tone] = tone_scores.get(tone, 0) + 2
+    
+    # Quick text analysis (limited to avoid slowdown)
+    for tone, patterns in tone_patterns.items():
+        for pattern in patterns[:3]:  # Only check top 3 patterns per tone
+            if pattern in overview_lower or pattern in title_lower:
+                tone_scores[tone] = tone_scores.get(tone, 0) + 1
+                break  # Stop after first match per tone
+    
+    return tone_scores
+
+def infer_user_tone_profile(user_movies):
+    """Fast inference of user's tonal preferences using genre patterns"""
+    user_tone_profile = {}
+    
+    # Fast genre-based tone mapping
+    genre_tone_map = {
+        28: 'thrilling',    # Action
+        35: 'comedic',      # Comedy  
+        80: 'dark',         # Crime
+        18: 'dramatic',     # Drama
+        27: 'dark',         # Horror
+        10749: 'romantic',  # Romance
+        53: 'thrilling',    # Thriller
+        10752: 'dramatic',  # War
+        36: 'dramatic',     # History
+        878: 'thrilling',   # Sci-Fi
+        14: 'dark',         # Fantasy (often dark themes)
+        9648: 'dark'        # Mystery
+    }
+    
+    # Analyze user movies quickly
+    for movie in user_movies:
+        movie_genres = movie.get('genre_ids', [])
+        
+        # Quick tone scoring based on genres only
+        for genre_id in movie_genres:
+            if genre_id in genre_tone_map:
+                tone = genre_tone_map[genre_id]
+                user_tone_profile[tone] = user_tone_profile.get(tone, 0) + 1
+        
+        # Bonus for genre combinations (no API calls)
+        genre_set = set(movie_genres)
+        if 18 in genre_set and 36 in genre_set:  # Drama + History
+            user_tone_profile['uplifting'] = user_tone_profile.get('uplifting', 0) + 1
+        if 28 in genre_set and 53 in genre_set:  # Action + Thriller
+            user_tone_profile['thrilling'] = user_tone_profile.get('thrilling', 0) + 1
+        if 80 in genre_set and 53 in genre_set:  # Crime + Thriller
+            user_tone_profile['dark'] = user_tone_profile.get('dark', 0) + 2
+    
+    return user_tone_profile
+
+def get_collaborative_candidates(user_movies):
+    """Fast collaborative filtering using only highest-rated user movie"""
+    similar_movie_ids = set()
+    
+    # Only use the highest-rated user movie to reduce API calls
+    best_movie = max(user_movies, key=lambda m: m.get('vote_average', 0))
+    
+    try:
+        response = requests.get(
+            f"{TMDB_BASE_URL}/movie/{best_movie['id']}/similar",
+            params={'api_key': TMDB_API_KEY, 'page': 1},
+            timeout=1.5  # Faster timeout
+        )
+        if response.ok:
+            similar_movies = response.json().get('results', [])
+            for sim_movie in similar_movies[:15]:  # Get more from single call
+                similar_movie_ids.add(sim_movie['id'])
+    except:
+        pass  # Continue without collaborative filtering if it fails
+    
+    return similar_movie_ids
+
+def recommend_movie(user_movies, candidates, feedback):
+    """
+    Advanced movie recommendation using comprehensive weighted scoring system
+    
+    Args:
+        user_movies: List of 4 movies user likes (with genre_ids, vote_average, etc.)
+        candidates: List of candidate movies from TMDB API
+        feedback: List of recent feedback entries with genres and liked boolean
+    
+    Returns:
+        List of top 5 candidates sorted by score
+    """
+    import math
+    
+    # 1. Enhanced Genre Matching - frequency vector with 10 points per match
+    genre_frequency = {}
+    for movie in user_movies:
+        for genre_id in movie.get('genre_ids', []):
+            genre_frequency[genre_id] = genre_frequency.get(genre_id, 0) + 1
+    
+    # 2. User Feedback Learning
+    liked_genres = set()
+    disliked_genres = set()
+    
+    for entry in feedback:
+        if entry.get('genres') and entry.get('liked') is not None:
+            genre_ids = [g['id'] for g in entry['genres'] if isinstance(g, dict) and 'id' in g]
+            if entry['liked']:
+                liked_genres.update(genre_ids)
+            else:
+                disliked_genres.update(genre_ids)
+    
+    # Liked genres override disliked
+    disliked_genres = disliked_genres - liked_genres
+    
+    # 3. Collaborative Filtering Approximation
+    collaborative_candidates = get_collaborative_candidates(user_movies)
+    
+    # 4. Emotional/Tonal Matching
+    user_tone_profile = infer_user_tone_profile(user_movies)
+    
+    # 5. Score each candidate
+    scored_candidates = []
+    
+    for candidate in candidates:
+        # Content Safety Filter
+        if (candidate.get('adult', False) or 
+            any(word in candidate.get('title', '').lower() for word in ['porn', 'xxx', 'hardcore'])):
+            continue
+        
+        score = 0
+        candidate_genres = set(candidate.get('genre_ids', []))
+        
+        # Enhanced Genre Matching (10 points per match, weighted by frequency)
+        for genre_id in candidate_genres:
+            if genre_id in genre_frequency:
+                score += 10 * genre_frequency[genre_id]
+        
+        # User Feedback Learning (+12/-8 per genre)
+        for genre_id in candidate_genres:
+            if genre_id in liked_genres:
+                score += 12
+            elif genre_id in disliked_genres:
+                score -= 8
+        
+        # Enhanced Rating Quality
+        rating = candidate.get('vote_average', 0)
+        vote_count = candidate.get('vote_count', 0)
+        
+        if rating >= 8.0:
+            score += 10
+        elif rating >= 7.5:
+            score += 6
+        elif rating >= 7.0:
+            score += 2
+        elif rating < 6.0:
+            score -= 10
+        
+        # Social proof bonus
+        if vote_count >= 1000:
+            score += 2
+        
+        # Alternative: vote_average * log(vote_count + 1) bonus
+        if vote_count > 0:
+            score += min(5, rating * math.log(vote_count + 1) / 10)  # Capped at 5 points
+        
+        # Enhanced Popularity Decay
+        popularity = candidate.get('popularity', 0)
+        if 20 <= popularity <= 150:
+            score += 8
+        elif popularity > 300:
+            score -= 2
+        elif popularity < 10 and score < 20:  # Deprioritize low popularity unless strong score
+            score *= 0.8
+        
+        # Collaborative Filtering Bonus
+        if candidate.get('id') in collaborative_candidates:
+            score += 10
+        
+        # Fast Emotional/Tonal Matching (no API calls)
+        candidate_tone_scores = get_cached_tone_analysis(
+            candidate.get('id', 0),
+            candidate.get('title', ''),
+            candidate.get('overview', ''),
+            candidate_genres
+        )
+        
+        for tone, user_strength in user_tone_profile.items():
+            if user_strength > 0 and tone in candidate_tone_scores:
+                tone_bonus = min(10, candidate_tone_scores[tone] * 3 * (user_strength / len(user_movies)))
+                score += tone_bonus
+        
+        scored_candidates.append((candidate, max(0, score)))
+    
+    # Sort by score and return top 5
+    scored_candidates.sort(key=lambda x: x[1], reverse=True)
+    return [movie for movie, score in scored_candidates[:5]]
+
+def calculate_similarity_score(candidate, user_analysis, user):
+    """Fast similarity scoring for candidate movies - kept for backward compatibility"""
+    # Get feedback data
+    recent_feedback = models.Recommendation.query.filter_by(
+        user_id=user.id
+    ).filter(
+        models.Recommendation.was_liked.isnot(None)
+    ).order_by(
+        models.Recommendation.recommended_at.desc()
+    ).limit(20).all()
+    
+    feedback_data = []
+    for rec in recent_feedback:
+        if rec.genres:
+            feedback_data.append({
+                'genres': rec.genres,
+                'liked': rec.was_liked
+            })
+    
+    # Use the improved recommendation function
+    user_movies = []  # Would need to be passed in real implementation
+    candidates = [candidate]
+    
+    # Fallback to simpler scoring if we can't use full system
+    score = 0
     candidate_genres = set(candidate.get('genre_ids', []))
     user_genres = set(user_analysis['primary_genres'])
     genre_overlap = len(candidate_genres.intersection(user_genres))
     
     if genre_overlap > 0:
-        score += genre_overlap * 30
-    
-    # Quick user feedback check (cached for speed)
-    if hasattr(user, '_genre_preferences_cache'):
-        user_feedback = user._genre_preferences_cache
-    else:
-        user_feedback = get_user_genre_preferences(user)
-        user._genre_preferences_cache = user_feedback
-    
-    for genre_id in candidate_genres:
-        if genre_id in user_feedback['liked_genres']:
-            score += 12
-        elif genre_id in user_feedback['disliked_genres']:
-            score -= 8
+        score += genre_overlap * 25
     
     # Rating quality
     candidate_rating = candidate.get('vote_average', 0)
-    if candidate_rating >= 7.5:
+    if candidate_rating >= 8.0:
         score += 10
-    elif candidate_rating >= 7.0:
+    elif candidate_rating >= 7.5:
         score += 6
+    elif candidate_rating >= 7.0:
+        score += 2
     elif candidate_rating < 6.0:
         score -= 10
     
-    # Simple popularity balance
+    # Popularity balance
     popularity = candidate.get('popularity', 0)
     if 20 <= popularity <= 150:
         score += 8
     elif popularity > 300:
-        score -= 2  # Avoid overly mainstream
+        score -= 2
     
     return max(0, score)
+
+def is_adult_content(movie):
+    """Check if movie contains explicitly pornographic content"""
+    # Only filter out explicitly pornographic content, not general adult themes
+    pornographic_keywords = [
+        'porn', 'xxx', 'hardcore', 'explicit', 'pornographic', 'adult film',
+        'sex tape', 'erotic film', 'blue movie', 'stag film'
+    ]
+    
+    title = movie.get('title', '').lower()
+    overview = movie.get('overview', '').lower()
+    
+    # Check for explicitly pornographic keywords
+    for keyword in pornographic_keywords:
+        if keyword in title or keyword in overview:
+            return True
+    
+    # Check if title contains obvious adult film patterns
+    if any(pattern in title for pattern in [' xxx ', 'adult ', 'porn ']):
+        return True
+    
+    return False
 
 def get_user_genre_preferences(user):
     """Fast user genre preference lookup with caching"""
@@ -271,60 +528,66 @@ def get_recommendation():
         
         def fetch_discover_movies(genres, sort_by='vote_average.desc', page=1):
             try:
-                # Cache key for this request
-                cache_key = f"discover_{','.join(map(str, genres))}_{sort_by}_{page}"
-                
                 response = requests.get(
                     f"{TMDB_BASE_URL}/discover/movie",
                     params={
                         'api_key': TMDB_API_KEY,
                         'with_genres': ','.join(map(str, genres)) if isinstance(genres, list) else str(genres),
                         'sort_by': sort_by,
-                        'vote_count.gte': 20,  # Even lower for more variety
-                        'vote_average.gte': 6.0,  # Fixed minimum quality
+                        'vote_count.gte': 30,  # Higher threshold for quality
+                        'vote_average.gte': 6.5,  # Higher quality baseline
                         'include_adult': False,
                         'page': page
                     },
-                    timeout=2  # Very fast timeout
+                    timeout=1.5  # Very fast timeout
                 )
-                return response.json().get('results', [])[:40] if response.ok else []
-            except Exception as e:
-                print(f"Discovery request failed: {e}")
+                return response.json().get('results', [])[:25] if response.ok else []
+            except:
                 return []
         
         def fetch_similar_movies(movie_id):
             try:
                 response = requests.get(
                     f"{TMDB_BASE_URL}/movie/{movie_id}/similar",
-                    params={'api_key': TMDB_API_KEY, 'page': 1},
+                    params={
+                        'api_key': TMDB_API_KEY, 
+                        'page': 1,
+                        'include_adult': False
+                    },
                     timeout=2
                 )
-                return response.json().get('results', [])[:15] if response.ok else []
+                results = response.json().get('results', []) if response.ok else []
+                # Additional filtering for explicitly pornographic content
+                filtered_results = [
+                    movie for movie in results 
+                    if not movie.get('adult', False) and 
+                    not is_adult_content(movie)
+                ]
+                return filtered_results[:15]
             except Exception as e:
                 print(f"Similar movies request failed: {e}")
                 return []
         
-        # Optimized concurrent requests with caching
+        # Ultra-fast concurrent requests
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             futures = []
             
-            # Single high-quality request for primary genres
+            # Primary genre discovery
             futures.append(executor.submit(fetch_discover_movies, primary_genres, 'vote_average.desc'))
             
-            # Similar movies only for highest-rated user movie
+            # Similar movies (optional, skip if slow)
             if user_movies:
                 best_movie = max(user_movies, key=lambda m: m.get('vote_average', 0))
                 futures.append(executor.submit(fetch_similar_movies, best_movie['id']))
             
-            # Collect results quickly
-            for future in concurrent.futures.as_completed(futures, timeout=5):
+            # Collect results with very short timeout
+            for future in concurrent.futures.as_completed(futures, timeout=3):
                 try:
                     results = future.result()
                     if results:
                         all_candidates.extend(results)
-                except Exception as e:
-                    print(f"Request failed: {e}")
-                    continue
+                except:
+                    continue  # Skip failed requests silently
         
         # Fast deduplication and filtering
         seen_ids = set(excluded_ids)
@@ -333,61 +596,52 @@ def get_recommendation():
         for movie in all_candidates:
             movie_id = movie.get('id')
             if (movie_id and movie_id not in seen_ids and
-                movie.get('vote_average', 0) >= 6.0 and  # Quality threshold
+                movie.get('vote_average', 0) >= 6.0 and
                 movie.get('poster_path') and
                 movie.get('overview') and
-                len(movie.get('overview', '')) > 20):  # Ensure meaningful overview
+                len(movie.get('overview', '')) > 20 and
+                not movie.get('adult', False) and
+                not is_adult_content(movie)):  # Additional adult content filtering
                 seen_ids.add(movie_id)
                 unique_candidates.append(movie)
                 
                 # Limit for performance while maintaining variety
-                if len(unique_candidates) >= 60:
+                if len(unique_candidates) >= 40:  # Reduced for speed
                     break
         
         if not unique_candidates:
             return jsonify({'error': 'No suitable recommendations found'}), 404
         
-        # Quick scoring with simplified algorithm
-        scored_candidates = []
-        user_genres = set(user_analysis['primary_genres'])
+        # Get user feedback for advanced scoring
+        recent_feedback = models.Recommendation.query.filter_by(
+            user_id=user.id
+        ).filter(
+            models.Recommendation.was_liked.isnot(None)
+        ).order_by(
+            models.Recommendation.recommended_at.desc()
+        ).limit(20).all()
         
-        for candidate in unique_candidates:
-            # Simplified fast scoring
-            score = 0
-            candidate_genres = set(candidate.get('genre_ids', []))
-            genre_overlap = len(candidate_genres.intersection(user_genres))
-            
-            if genre_overlap > 0:
-                score += genre_overlap * 30
-            
-            # Rating bonus
-            rating = candidate.get('vote_average', 0)
-            if rating >= 7.0:
-                score += 15
-            elif rating >= 6.5:
-                score += 10
-            
-            # Popularity balance
-            popularity = candidate.get('popularity', 0)
-            if 10 <= popularity <= 200:
-                score += 10
-            elif popularity > 200:
-                score += 5
-            
-            scored_candidates.append((candidate, score))
+        feedback_data = []
+        for rec in recent_feedback:
+            if rec.genres:
+                feedback_data.append({
+                    'genres': rec.genres,
+                    'liked': rec.was_liked
+                })
         
-        # Selection from wider range of candidates for variety
-        scored_candidates.sort(key=lambda x: x[1], reverse=True)
-        top_candidates = scored_candidates[:20]  # Larger pool for variety
+        # Use improved recommendation function
+        top_recommendations = recommend_movie(user_movies, unique_candidates, feedback_data)
         
-        import random
-        # Simple weighted random selection
-        if top_candidates:
-            weights = [max(1, score) for _, score in top_candidates]
-            recommendation = random.choices([movie for movie, _ in top_candidates], weights=weights)[0]
+        if top_recommendations:
+            import random
+            # Select randomly from top 3 recommendations for variety
+            recommendation = random.choice(top_recommendations[:3])
         else:
-            # Fallback to first candidate if scoring fails
-            recommendation = unique_candidates[0]
+            # Fallback to first candidate if no recommendations
+            recommendation = unique_candidates[0] if unique_candidates else None
+            
+        if not recommendation:
+            return jsonify({'error': 'No suitable recommendations found'}), 404
         
         # Get detailed movie information for genres
         movie_details_response = requests.get(
